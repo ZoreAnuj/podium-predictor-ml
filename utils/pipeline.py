@@ -1,0 +1,157 @@
+import fastf1
+import pandas as pd
+
+
+# extracts the nexessary data from the session and returns it as a pandas dataframe 
+def extract_session_data(year: int, grand_prix_name: str, session_name: str, merge_weather=True) -> pd.DataFrame:
+
+    session = fastf1.get_session(year, grand_prix_name, session_name)
+    session.load()
+
+    laps = session.laps.copy()
+
+    for col in ['Sector1Time', 'Sector2Time', 'Sector3Time']:
+        if col in laps.columns:
+            laps[col + '_s'] = laps[col].dt.total_seconds()
+
+    laps.drop(columns=['Sector1Time', 'Sector2Time', 'Sector3Time'], inplace=True)
+
+    if 'LapStartTime' in laps.columns:
+        laps['LapStartTime_s'] = laps['LapStartTime'].dt.total_seconds()
+
+    if 'LapTime' in laps.columns:
+        laps['LapTime_s'] = laps['LapTime'].dt.total_seconds()
+        laps.drop(columns=['LapTime'], inplace=True)
+
+    if merge_weather:
+        weather = session.weather_data.copy()
+        weather['Time_s'] = weather['Time'].dt.total_seconds()
+        weather.drop(columns=['Time'], inplace=True)
+        laps = laps.merge(weather, left_on='LapStartTime_s', right_on='Time_s', how='left')
+        laps.drop(columns=['Time_s'], inplace=True)
+
+    return laps
+
+
+
+# cleans the session data by removing inaccurate lines and NA values
+def clean_session_data(laps: pd.DataFrame):
+
+    clean = laps.copy()
+
+    if 'IsAccurate' in clean.columns:
+        clean = clean[clean['IsAccurate'] == True]
+    if 'SpeedFL' in clean.columns:
+        clean = clean[clean['SpeedFL'].notna()]
+    if 'LapTime_s' in clean.columns:
+        clean = clean[clean['LapTime_s'].notna()]
+
+    return clean.reset_index(drop=True)
+
+
+# returns the data fro a specific driver based on the driver code 
+def get_driver_laps(df, driver_code):
+    return df[df['Driver'] == driver_code].reset_index(drop=True)
+
+
+# computes the FP2 features that are not present in the dataset initially
+# like average lap time in FP2, best lap time in FP2, and total laps done in FP2
+def extract_fp2_features(df):
+
+    fp2_features = df.groupby("Driver").agg({
+        "LapTime_s": ["mean", "min", "count"]
+    })
+
+    fp2_features.columns = ["fp2_avg_lap", "fp2_best_lap", "fp2_total_laps"]
+    fp2_features = fp2_features.reset_index()
+
+    return fp2_features
+
+
+
+# extract necessary Quali features, like fastest lap in qualifying, and 
+# qualifying position
+def extract_quali_features(df_quali):
+    df_quali = df_quali[df_quali['LapTime_s'].notna()]
+    
+    fastest_laps = df_quali.groupby('Driver')['LapTime_s'].min().reset_index()
+    fastest_laps.rename(columns={'LapTime_s': 'FastestQualiLap'}, inplace=True)
+    
+    fastest_laps['QualiPosition'] = fastest_laps['FastestQualiLap'].rank(method='min').astype(int)
+
+    return fastest_laps
+
+
+
+# combines the fp2 features, quali features, and the final result dictionary 
+# to create the dataframe with all the necessary data for modeling
+def assemble_race_dataset(fp2_features, quali_features, race_results_dict):
+    combined_df = fp2_features.merge(quali_features, on="Driver", how="inner")
+
+    results_df = pd.DataFrame.from_dict(race_results_dict, orient='index').reset_index()
+    results_df.columns = ['Driver', 'RacePosition', 'DNF']
+
+    final_df = combined_df.merge(results_df, on="Driver", how="inner")
+
+    return final_df
+
+
+# same as previoud just excludes the manula results dict used for training
+def assemble_race_dataset_pre_race(fp2_features, quali_features):
+    # Merge FP2 and Quali data on Driver
+    combined_df = fp2_features.merge(quali_features, on="Driver", how="inner")
+    
+    # Return combined features for prediction (no race results)
+    return combined_df
+
+
+# might try and make a function which will request race results from 
+# the API for which it is available 
+def extract_race_results():
+
+
+
+
+
+    return 
+
+
+
+# combines the race dataframe to the master dataframe 
+# which contains all the previously extracted data
+def append_to_master_dataset(master_df, race_df):
+    return
+
+
+
+# helps create a first draft of the finishing position dictionary
+def get_manual_finish_dict(year: int, grand_prix: str) -> dict:
+    """
+    Returns a dictionary mapping driver codes to [position, DNF]
+    for the given race session. DSQ and DNF both marked as DNF=True.
+    """
+
+    session = fastf1.get_session(year, grand_prix, 'R')
+    session.load()
+
+    laps = session.laps
+    last_valid_laps = laps[laps['Position'].notna()].sort_values('LapNumber')
+    final_laps = last_valid_laps.groupby('Driver').tail(1).copy()
+
+    total_laps = final_laps['LapNumber'].max()
+    final_laps = final_laps.sort_values('Position').reset_index(drop=True)
+    final_laps['Rank'] = final_laps.index + 1
+    final_laps['DNF'] = final_laps['LapNumber'] < total_laps
+
+    result_dict = {
+        driver: [int(row['Rank']), bool(row['DNF'])]
+        for driver, row in final_laps.set_index('Driver')[['Rank', 'DNF']].iterrows()
+    }
+
+    all_drivers = set(session.results['Abbreviation']) if session.results is not None else set(laps['Driver'].unique())
+    missing_drivers = all_drivers - set(result_dict.keys())
+
+    for drv in missing_drivers:
+        result_dict[drv] = [21, True]
+
+    return result_dict
